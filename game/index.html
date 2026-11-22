@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GHOST SLURP — 30 coins, 12 bugs, 60 seconds, 1 hungry ghost</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0710; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: "Segoe UI", system-ui, sans-serif; }
+  #wrap { position: relative; width: min(96vw, calc(96vh * 16 / 9)); aspect-ratio: 16 / 9; }
+  canvas { width: 100%; height: 100%; display: block; border-radius: 12px;
+    box-shadow: 0 0 60px rgba(255, 0, 128, 0.25), 0 0 120px rgba(0, 229, 255, 0.12); background: #120a18; }
+  #hint { position: absolute; left: 0; right: 0; bottom: -28px; text-align: center;
+    color: #8a7a92; font-size: 13px; letter-spacing: 0.04em; }
+  #hint b { color: #ffb3d9; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="hint">Move <b>WASD / arrows / mouse</b> &nbsp;·&nbsp; Hold <b>SPACE</b> or mouse button to <b>SLURP</b> coins in &nbsp;·&nbsp; Bugs steal a life — slurping drags them closer too</div>
+</div>
+<script>
+"use strict";
+// GHOST SLURP — 30 coins, 12 bugs, 60 seconds, 1 hungry ghost.
+// Built from one prompt by an AI coding agent for make.fun.
+// Play code: makefun-barnacle-doorway-silo · Referral: 4h54dhb7
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+const W = 960, H = 540;
+const TOTAL_COINS = 30, TOTAL_BUGS = 12, ROUND_SECONDS = 60;
+const SLURP_RADIUS = 150, SLURP_PULL = 620;
+
+const params = new URLSearchParams(location.search);
+const DEMO = params.get("demo") === "1"; // autoplay bot, for the video
+
+const keys = {};
+let mouse = { x: W / 2, y: H / 2, down: false, active: false };
+addEventListener("keydown", e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === " ") e.preventDefault();
+  if (e.key.toLowerCase() === "r" && state !== "playing") startGame();
+  if (e.key === " " && state === "start") startGame();
+  if (e.key === "Enter" && state === "start") startGame();
+});
+addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+cv.addEventListener("mousemove", e => {
+  const r = cv.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) / r.width * W;
+  mouse.y = (e.clientY - r.top) / r.height * H;
+  mouse.active = true;
+});
+cv.addEventListener("mousedown", e => { mouse.down = true; if (state === "start") startGame(); });
+addEventListener("mouseup", () => { mouse.down = false; });
+
+let state = "start"; // start | playing | over
+let ghost, coins, bugs, particles, floaters;
+let score, lives, timeLeft, coinsSpawned, bugsSpawned, spawnTimer, bugTimer;
+let best = 0, slurpOn = false, invuln = 0, shake = 0, elapsed = 0, endReason = "time";
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+function resetGame() {
+  ghost = { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 22, face: 1 };
+  coins = []; bugs = []; particles = []; floaters = [];
+  score = 0; lives = 3; timeLeft = ROUND_SECONDS;
+  coinsSpawned = 0; bugsSpawned = 0; spawnTimer = 0; bugTimer = 1.2;
+  slurpOn = false; invuln = 0; shake = 0; elapsed = 0;
+  for (let i = 0; i < 5; i++) spawnCoin();
+  for (let i = 0; i < 3; i++) spawnBug();
+}
+function spawnCoin() {
+  if (coinsSpawned >= TOTAL_COINS) return;
+  coinsSpawned++;
+  coins.push({ x: rand(50, W - 50), y: rand(90, H - 50), r: 13, bob: rand(0, 6.28), got: false });
+}
+function spawnBug() {
+  if (bugsSpawned >= TOTAL_BUGS) return;
+  bugsSpawned++;
+  let x, y;
+  do { x = rand(40, W - 40); y = rand(90, H - 40); }
+  while (dist(x, y, ghost.x, ghost.y) < 220);
+  bugs.push({ x, y, vx: rand(-40, 40), vy: rand(-40, 40), r: 16, glitch: rand(0, 1), turn: rand(1, 3) });
+}
+function startGame() { resetGame(); state = "playing"; }
+function endGame(win, reason) {
+  state = "over";
+  endReason = reason || "time";
+  best = Math.max(best, score);
+  const line = win ? "ALL 30 SLURPED!" : (endReason === "bitten" ? "THE BUGS GOT YOU!" : "TIME!");
+  floaters.push({ x: W / 2, y: H / 2 - 40, text: line, life: 2, color: win ? "#7CFC98" : "#ffb3d9" });
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, 6.28), s = rand(60, 260);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(0.3, 0.7), color, r: rand(2, 5) });
+  }
+}
+function beep(freq, dur) {
+  try {
+    const ac = beep.ac || (beep.ac = new (window.AudioContext || window.webkitAudioContext)());
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = "sine"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.08, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + dur);
+  } catch (e) { /* audio is a bonus, never a blocker */ }
+}
+
+// --- demo bot: plays itself so the video shows real gameplay ---
+function demoDrive(dt) {
+  if (coins.length === 0) return;
+  let target = coins[0], bd = 1e9;
+  for (const c of coins) { const d = dist(ghost.x, ghost.y, c.x, c.y); if (d < bd) { bd = d; target = c; } }
+  let ax = (target.x - ghost.x) / Math.max(bd, 1), ay = (target.y - ghost.y) / Math.max(bd, 1);
+  let nearestBug = 1e9;
+  for (const b of bugs) {
+    const d = dist(ghost.x, ghost.y, b.x, b.y);
+    nearestBug = Math.min(nearestBug, d);
+    if (d < 220) { ax += (ghost.x - b.x) / d * 2.2; ay += (ghost.y - b.y) / d * 2.2; }
+  }
+  if (nearestBug < 140) { // too close: forget the coin, just run
+    ax = 0; ay = 0;
+    for (const b of bugs) {
+      const d = dist(ghost.x, ghost.y, b.x, b.y);
+      if (d < 220) { ax += (ghost.x - b.x) / d; ay += (ghost.y - b.y) / d; }
+    }
+  }
+  const len = Math.hypot(ax, ay) || 1;
+  ghost.vx += ax / len * 900 * dt; ghost.vy += ay / len * 900 * dt;
+  // slurp only when no bug is close: slurping drags bugs in too
+  slurpOn = bd < SLURP_RADIUS + 30 && nearestBug > 120;
+}
+
+function update(dt) {
+  elapsed += dt;
+  if (state !== "playing") return;
+  timeLeft -= dt;
+  if (timeLeft <= 0) { timeLeft = 0; endGame(score >= TOTAL_COINS, "time"); return; }
+  if (invuln > 0) invuln -= dt;
+  if (shake > 0) shake -= dt;
+
+  spawnTimer -= dt;
+  if (spawnTimer <= 0 && coinsSpawned < TOTAL_COINS) { spawnCoin(); spawnTimer = rand(0.5, 1.1); }
+  bugTimer -= dt;
+  if (bugTimer <= 0 && bugsSpawned < TOTAL_BUGS) { spawnBug(); bugTimer = rand(2.5, 4); }
+
+  slurpOn = keys[" "] || mouse.down;
+  if (DEMO) demoDrive(dt);
+
+  // movement
+  let ax = 0, ay = 0;
+  if (keys["a"] || keys["arrowleft"]) ax -= 1;
+  if (keys["d"] || keys["arrowright"]) ax += 1;
+  if (keys["w"] || keys["arrowup"]) ay -= 1;
+  if (keys["s"] || keys["arrowdown"]) ay += 1;
+  if (mouse.active && !DEMO && (ax === 0 && ay === 0)) {
+    const d = dist(ghost.x, ghost.y, mouse.x, mouse.y);
+    if (d > 12) { ax = (mouse.x - ghost.x) / d; ay = (mouse.y - ghost.y) / d; }
+  }
+  const al = Math.hypot(ax, ay);
+  if (al > 0) { ghost.vx += ax / al * 1050 * dt; ghost.vy += ay / al * 1050 * dt; ghost.face = ax !== 0 ? Math.sign(ax) : ghost.face; }
+  ghost.vx *= Math.pow(0.0015, dt); ghost.vy *= Math.pow(0.0015, dt);
+  ghost.x = Math.max(24, Math.min(W - 24, ghost.x + ghost.vx * dt));
+  ghost.y = Math.max(78, Math.min(H - 24, ghost.y + ghost.vy * dt)); // 78 keeps the ghost clear of the HUD bar
+
+  // slurp: coins fly in fast, bugs creep in slowly (the risk)
+  if (slurpOn) {
+    for (const c of coins) {
+      const d = dist(ghost.x, ghost.y, c.x, c.y);
+      if (d < SLURP_RADIUS && d > 1) {
+        const pull = SLURP_PULL * (1 - d / SLURP_RADIUS) + 180;
+        c.x += (ghost.x - c.x) / d * pull * dt;
+        c.y += (ghost.y - c.y) / d * pull * dt;
+      }
+    }
+    for (const b of bugs) {
+      const d = dist(ghost.x, ghost.y, b.x, b.y);
+      if (d < SLURP_RADIUS && d > 1) {
+        b.x += (ghost.x - b.x) / d * 90 * dt;
+        b.y += (ghost.y - b.y) / d * 90 * dt;
+      }
+    }
+  }
+
+  // coins
+  for (const c of coins) {
+    c.bob += dt * 3;
+    if (dist(ghost.x, ghost.y, c.x, c.y) < ghost.r + c.r - 4) {
+      c.got = true; score++;
+      burst(c.x, c.y, "#ffd94a", 12);
+      floaters.push({ x: c.x, y: c.y - 14, text: "+1", life: 0.8, color: "#ffd94a" });
+      beep(660 + score * 12, 0.12);
+      if (score >= TOTAL_COINS) { coins = coins.filter(k => !k.got); endGame(true, "win"); return; }
+    }
+  }
+  coins = coins.filter(c => !c.got);
+
+  // bugs chase, wobble, and bite
+  for (const b of bugs) {
+    b.turn -= dt;
+    if (b.turn <= 0) { b.turn = rand(0.8, 2); b.glitch = rand(0, 1); }
+    const d = dist(ghost.x, ghost.y, b.x, b.y);
+    const chase = d < 200 ? 1 : 0;
+    b.vx += ((ghost.x - b.x) / Math.max(d, 1) * 80 * chase + Math.sin(elapsed * 2 + b.glitch * 9) * 60) * dt;
+    b.vy += ((ghost.y - b.y) / Math.max(d, 1) * 80 * chase + Math.cos(elapsed * 2.3 + b.glitch * 7) * 60) * dt;
+    const sp = Math.hypot(b.vx, b.vy), max = 110;
+    if (sp > max) { b.vx *= max / sp; b.vy *= max / sp; }
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.x < 20 || b.x > W - 20) b.vx *= -1;
+    if (b.y < 84 || b.y > H - 20) b.vy *= -1;
+    b.x = Math.max(20, Math.min(W - 20, b.x));
+    b.y = Math.max(84, Math.min(H - 20, b.y));
+    if (invuln <= 0 && d < ghost.r + b.r - 6) {
+      lives--; invuln = 1.4; shake = 0.4;
+      burst(ghost.x, ghost.y, "#ff2e63", 18);
+      beep(140, 0.25);
+      ghost.vx = (ghost.x - b.x) / d * 420; ghost.vy = (ghost.y - b.y) / d * 420;
+      if (lives <= 0) { endGame(false, "bitten"); return; }
+    }
+  }
+
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floaters) { f.y -= 34 * dt; f.life -= dt; }
+  floaters = floaters.filter(f => f.life > 0);
+}
+
+function drawGhost(x, y, r, t, color, slurping) {
+  ctx.save();
+  ctx.translate(x, y);
+  const wob = Math.sin(t * 6) * 2;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(0, -r * 0.15 + wob, r, Math.PI, 0);
+  ctx.lineTo(r, r * 0.8);
+  const waves = 4, step = (2 * r) / waves;
+  for (let i = 0; i < waves; i++) {
+    const x0 = r - i * step, x1 = r - (i + 0.5) * step, x2 = r - (i + 1) * step;
+    ctx.quadraticCurveTo(x1, r * 0.8 + (i % 2 ? -7 : 7), x2, r * 0.8);
+  }
+  ctx.closePath(); ctx.fill();
+  // eyes + mouth
+  ctx.fillStyle = "#120a18";
+  ctx.beginPath(); ctx.arc(-r * 0.38, -r * 0.2 + wob, r * 0.16, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(r * 0.38, -r * 0.2 + wob, r * 0.16, 0, 6.29); ctx.fill();
+  ctx.fillStyle = "#120a18";
+  ctx.beginPath();
+  ctx.ellipse(0, r * 0.28 + wob, slurping ? r * 0.3 : r * 0.14, slurping ? r * 0.34 : r * 0.18, 0, 0, 6.29);
+  ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-6, 6) * shake * 10, rand(-6, 6) * shake * 10);
+  // background: deep violet + faint grid
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#1a0b26"); g.addColorStop(1, "#0d0710");
+  ctx.fillStyle = g; ctx.fillRect(-10, -10, W + 20, H + 20);
+  ctx.strokeStyle = "rgba(255,255,255,0.045)"; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 48) { ctx.beginPath(); ctx.moveTo(x, 56); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 56; y < H; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+  if (state === "start") {
+    // start screen: branding, numbers, controls
+    ctx.textAlign = "center";
+    drawGhost(W / 2, 190, 52, elapsed, "#f5f0ff", false);
+    ctx.fillStyle = "#ff2e88";
+    ctx.font = "bold 64px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("GHOST SLURP", W / 2, 300);
+    ctx.fillStyle = "#00e5ff";
+    ctx.font = "bold 26px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("30 coins · 12 bugs · 60 seconds · 1 hungry ghost", W / 2, 342);
+    ctx.fillStyle = "#e8ddf2";
+    ctx.font = "20px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("Move with WASD / arrows / mouse — hold SPACE to SLURP coins in.", W / 2, 384);
+    ctx.fillText("Slurping drags bugs closer too. Don't get bitten!", W / 2, 412);
+    ctx.fillStyle = Math.sin(elapsed * 4) > 0 ? "#ffd94a" : "#e8ddf2";
+    ctx.font = "bold 24px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("▶  Press SPACE or click to play", W / 2, 462);
+    ctx.fillStyle = "#8a7a92";
+    ctx.font = "17px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("Built from one prompt by an AI agent on make.fun  ·  Play code: makefun-barnacle-doorway-silo  ·  Referral: 4h54dhb7", W / 2, 512);
+    ctx.restore();
+    return;
+  }
+
+  // slurp radius
+  if (state === "playing" && slurpOn) {
+    const rg = ctx.createRadialGradient(ghost.x, ghost.y, 10, ghost.x, ghost.y, SLURP_RADIUS);
+    rg.addColorStop(0, "rgba(0,229,255,0.20)"); rg.addColorStop(1, "rgba(0,229,255,0)");
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(ghost.x, ghost.y, SLURP_RADIUS, 0, 6.29); ctx.fill();
+    ctx.strokeStyle = "rgba(0,229,255,0.55)"; ctx.setLineDash([10, 8]);
+    ctx.beginPath(); ctx.arc(ghost.x, ghost.y, SLURP_RADIUS, 0, 6.29); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // coins
+  for (const c of coins) {
+    const bobY = Math.sin(c.bob) * 3;
+    ctx.fillStyle = "#ffd94a";
+    ctx.beginPath(); ctx.arc(c.x, c.y + bobY, c.r, 0, 6.29); ctx.fill();
+    ctx.fillStyle = "#b8860b";
+    ctx.beginPath(); ctx.arc(c.x, c.y + bobY, c.r * 0.62, 0, 6.29); ctx.fill();
+    ctx.fillStyle = "#ffd94a";
+    ctx.font = "bold 15px 'Segoe UI', sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("$", c.x, c.y + bobY + 5);
+  }
+
+  // bugs
+  for (const b of bugs) {
+    const jx = (Math.random() - 0.5) * (b.glitch > 0.7 ? 6 : 0);
+    ctx.save(); ctx.translate(b.x + jx, b.y);
+    ctx.fillStyle = "#ff2e63";
+    ctx.fillRect(-b.r, -b.r * 0.7, b.r * 2, b.r * 1.4);
+    ctx.fillStyle = "#ff7aa8";
+    ctx.fillRect(-b.r * 0.6, -b.r * 1.1, b.r * 0.35, b.r * 0.5);
+    ctx.fillRect(b.r * 0.25, -b.r * 1.1, b.r * 0.35, b.r * 0.5);
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-b.r * 0.35, -b.r * 0.1, b.r * 0.22, 0, 6.29); ctx.fill();
+    ctx.beginPath(); ctx.arc(b.r * 0.35, -b.r * 0.1, b.r * 0.22, 0, 6.29); ctx.fill();
+    ctx.fillStyle = "#120a18";
+    ctx.beginPath(); ctx.arc(-b.r * 0.35, -b.r * 0.1, b.r * 0.1, 0, 6.29); ctx.fill();
+    ctx.beginPath(); ctx.arc(b.r * 0.35, -b.r * 0.1, b.r * 0.1, 0, 6.29); ctx.fill();
+    ctx.strokeStyle = "#ff2e63"; ctx.lineWidth = 2;
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath(); ctx.moveTo(i * b.r * 0.5, b.r * 0.7); ctx.lineTo(i * b.r * 0.7, b.r * 1.2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // particles + floaters
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(p.life / 0.7, 0);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.29); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "center";
+  for (const f of floaters) {
+    ctx.globalAlpha = Math.max(f.life, 0);
+    ctx.fillStyle = f.color; ctx.font = "bold 20px 'Segoe UI', sans-serif";
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // ghost (blinks while invulnerable)
+  if (!(invuln > 0 && Math.floor(elapsed * 12) % 2 === 0)) {
+    drawGhost(ghost.x, ghost.y, ghost.r, elapsed, "#f5f0ff", slurpOn);
+  }
+
+  // HUD
+  ctx.fillStyle = "rgba(13,7,16,0.72)"; ctx.fillRect(0, 0, W, 52);
+  ctx.fillStyle = "#e8ddf2"; ctx.textAlign = "left";
+  ctx.font = "bold 22px 'Segoe UI', sans-serif";
+  ctx.fillText("🪙 " + score + " / " + TOTAL_COINS, 18, 35);
+  ctx.fillStyle = timeLeft <= 10 ? "#ff5c5c" : "#e8ddf2";
+  ctx.textAlign = "center";
+  ctx.fillText("⏱ " + Math.ceil(timeLeft) + "s", W / 2, 35);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#ff5c7a";
+  ctx.fillText("♥".repeat(Math.max(lives, 0)) + "♡".repeat(Math.max(3 - lives, 0)), W - 18, 35);
+  ctx.fillStyle = "#8a7a92"; ctx.font = "15px 'Segoe UI', sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("make.fun · makefun-barnacle-doorway-silo", 18, H - 12);
+
+  if (state === "over") {
+    ctx.fillStyle = "rgba(13,7,16,0.82)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = score >= TOTAL_COINS ? "#7CFC98" : "#ffb3d9";
+    ctx.font = "bold 56px 'Segoe UI', sans-serif";
+    ctx.fillText(score >= TOTAL_COINS ? "ALL 30 SLURPED!" : (endReason === "bitten" ? "THE BUGS GOT YOU!" : "TIME'S UP!"), W / 2, 210);
+    ctx.fillStyle = "#ffd94a";
+    ctx.font = "bold 40px 'Segoe UI', sans-serif";
+    ctx.fillText("Score: " + score + " / " + TOTAL_COINS + " coins", W / 2, 272);
+    ctx.fillStyle = "#e8ddf2"; ctx.font = "22px 'Segoe UI', sans-serif";
+    ctx.fillText("Best this session: " + best, W / 2, 312);
+    ctx.fillStyle = Math.sin(elapsed * 4) > 0 ? "#ffd94a" : "#e8ddf2";
+    ctx.font = "bold 24px 'Segoe UI', sans-serif";
+    ctx.fillText("Press R to play again", W / 2, 366);
+    ctx.fillStyle = "#8a7a92"; ctx.font = "17px 'Segoe UI', sans-serif";
+    ctx.fillText("Built from one prompt by an AI agent on make.fun  ·  Play code: makefun-barnacle-doorway-silo  ·  Referral: 4h54dhb7", W / 2, 420);
+    ctx.fillText("Come build your own game: https://make.fun/bounty/post-x-the-agent-builds-a-game-from-20261122-1709", W / 2, 448);
+  }
+  ctx.restore();
+}
+
+resetGame();
+if (DEMO) startGame();
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  if (state === "start" || state === "over") elapsed += dt;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
